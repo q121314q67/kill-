@@ -1,0 +1,30 @@
+# Roblox
+*.rbxl
+*.rbxlx
+*.rbxm
+*.rbxmx
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+.env
+.env.local
+
+# Logs
+*.log
+*.logs
+
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+
+# Temporary
+*.tmp
+*.temp
+.cache/
