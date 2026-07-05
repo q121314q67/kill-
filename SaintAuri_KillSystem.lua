@@ -1,9 +1,6 @@
 --[[
-    杀戮系统 v10.0 [范围调试与近战重构版]
-    更新：
-    1. 近战杀戮核心发包逻辑完全恢复并融合多线程AOE
-    2. 恢复近战/远程范围调试滑块，修改范围时本地生成圆环可视化
-    3. 远程新增穿墙射击、无停顿连射开关
+    杀戮系统 v10.1 [紧急修复版]
+    修复：Part 无 Visible 属性导致脚本崩溃的问题，改用 Parent 控制显隐
 ]]
 
 local Players = game:GetService("Players")
@@ -33,8 +30,8 @@ local Config = {
     Ranged_Range = 1000,
     Ranged_AutoHeadshot = true,
     Ranged_MultiBullet = true,
-    Ranged_WallBang = false, -- 新增：穿墙射击
-    Ranged_NoCooldown = true, -- 新增：无停顿连射
+    Ranged_WallBang = false,
+    Ranged_NoCooldown = true,
     Ranged_CheckFriends = false,
     Ranged_CheckVisibility = false,
     Ranged_AllowedTeams = {},
@@ -103,7 +100,7 @@ BlurEffect.Size = 0
 BlurEffect.Parent = Lighting
 
 -- ==========================================
--- [范围可视化圆环]
+-- [范围可视化圆环 - 修复版]
 -- ==========================================
 local RangeMarker = Instance.new("Part")
 RangeMarker.Shape = Enum.PartType.Ball
@@ -113,8 +110,7 @@ RangeMarker.Transparency = 0.8
 RangeMarker.Anchored = true
 RangeMarker.CanCollide = false
 RangeMarker.CanQuery = false
-RangeMarker.Visible = false
-RangeMarker.Parent = workspace
+RangeMarker.Parent = nil -- 默认隐藏，通过 Parent 控制显隐
 
 RunService.RenderStepped:Connect(function()
     local char = LocalPlayer.Character
@@ -124,16 +120,16 @@ RunService.RenderStepped:Connect(function()
         local showRanged = Config.Ranged_Enabled
         
         if showMelee or showRanged then
-            RangeMarker.Visible = true
+            RangeMarker.Parent = workspace
             local r = showMelee and Config.Melee_Range or Config.Ranged_Range
             RangeMarker.Size = Vector3.new(r*2, r*2, r*2)
             RangeMarker.CFrame = root.CFrame
             RangeMarker.Color = showMelee and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(50, 150, 255)
         else
-            RangeMarker.Visible = false
+            RangeMarker.Parent = nil
         end
     else
-        RangeMarker.Visible = false
+        RangeMarker.Parent = nil
     end
 end)
 
@@ -362,7 +358,6 @@ local function CreateToggle(parent, name, configKey, icon)
     return row
 end
 
--- 恢复范围调试滑块控件
 local function CreateSlider(parent, name, minVal, maxVal, default, configKey)
     local row = CreateRow(parent, 50)
     
@@ -667,7 +662,6 @@ local function FetchRemote()
     return nil
 end
 
--- 获取范围内所有有效目标
 local function GetValidTargets(mode)
     local localChar = LocalPlayer.Character
     if not localChar or not localChar:FindFirstChild("HumanoidRootPart") or not localChar:FindFirstChild("Humanoid") then return {} end
@@ -678,7 +672,6 @@ local function GetValidTargets(mode)
     
     local checkFriends = Config[mode .. "_CheckFriends"]
     local checkVis = Config[mode .. "_CheckVisibility"]
-    -- 如果远程开启了穿墙，则强制关闭可见性检测
     if mode == "Ranged" and Config.Ranged_WallBang then checkVis = false end
     
     local allowedTeams = Config[mode .. "_AllowedTeams"]
@@ -755,7 +748,7 @@ local function ClearHighlights(highlightTable)
 end
 
 -- ==========================================
--- [近战战斗逻辑 - 示范逻辑重构AOE版]
+-- [近战战斗逻辑]
 -- ==========================================
 local function GetBodyPartsArray(character)
     local parts = {}
@@ -772,7 +765,7 @@ function StartMeleeLoop()
     if State.MeleeThread then task.cancel(State.MeleeThread) end
     State.MeleeThread = task.spawn(function()
         while Config.Melee_Enabled do
-            task.wait(0.3) -- 保持示范代码的 0.3 秒节奏
+            task.wait(0.3)
             
             local Remote = FetchRemote()
             if not Remote then task.wait(1) continue end
@@ -793,7 +786,6 @@ function StartMeleeLoop()
                 local localRoot = localChar.HumanoidRootPart
                 local localPos = localRoot.Position
                 
-                -- AOE 遍历所有目标并分配独立线程
                 for _, targetData in ipairs(targets) do
                     local targetChar = targetData.Char
                     table.insert(activeChars, targetChar)
@@ -802,7 +794,6 @@ function StartMeleeLoop()
                         local bodyPartsArr = Config.Melee_MultiHit and GetBodyPartsArray(targetChar) or {{ [1] = "HumanoidRootPart", [2] = 1 }}
                         
                         local targetPos = targetData.Root.Position
-                        -- 严格照搬示范代码的向量计算
                         local direction = (localPos - targetPos).Unit 
                         
                         local args = {
@@ -833,7 +824,7 @@ function StartMeleeLoop()
 end
 
 -- ==========================================
--- [远程战斗逻辑 - AOE多线程并发]
+-- [远程战斗逻辑]
 -- ==========================================
 local function GetEquippedWeaponName()
     local char = LocalPlayer.Character
@@ -867,7 +858,6 @@ function StartRangedLoop()
     if State.RangedThread then task.cancel(State.RangedThread) end
     State.RangedThread = task.spawn(function()
         while Config.Ranged_Enabled do
-            -- 无停顿连射开关控制等待时间
             if Config.Ranged_NoCooldown then
                 RunService.Heartbeat:Wait()
             else
@@ -1050,4 +1040,4 @@ task.spawn(function()
     end
 end)
 
-print("[KillSystem v10.0] 范围调试与近战重构版已加载。")
+print("[KillSystem v10.1] 紧急修复版已加载。")
