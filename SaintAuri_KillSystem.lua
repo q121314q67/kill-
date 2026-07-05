@@ -1,9 +1,9 @@
 --[[
-    杀戮系统 v9.7 [快捷键共存与ESP强化版]
+    杀戮系统 v10.0 [范围调试与近战重构版]
     更新：
-    1. 修复多个快捷键共存问题，支持近战/远程快捷键同时存在
-    2. ESP强化：队伍颜色、真实血量上限、杀戮锁定状态显示
-    3. 移除服务器校验无效的自动吃药与防击倒功能
+    1. 近战杀戮核心发包逻辑完全恢复并融合多线程AOE
+    2. 恢复近战/远程范围调试滑块，修改范围时本地生成圆环可视化
+    3. 远程新增穿墙射击、无停顿连射开关
 ]]
 
 local Players = game:GetService("Players")
@@ -20,6 +20,7 @@ local LocalPlayer = Players.LocalPlayer
 local Config = {
     -- 近战
     Melee_Enabled = false,
+    Melee_Range = 30,
     Melee_MultiHit = true,
     Melee_ForceCombatMode = true,
     Melee_SelfAntiCombatMode = false,
@@ -29,8 +30,11 @@ local Config = {
     
     -- 远程
     Ranged_Enabled = false,
+    Ranged_Range = 1000,
     Ranged_AutoHeadshot = true,
     Ranged_MultiBullet = true,
+    Ranged_WallBang = false, -- 新增：穿墙射击
+    Ranged_NoCooldown = true, -- 新增：无停顿连射
     Ranged_CheckFriends = false,
     Ranged_CheckVisibility = false,
     Ranged_AllowedTeams = {},
@@ -53,8 +57,8 @@ local State = {
     IsPlacingShortcut = false,
     CurrentActionToBind = nil,
     CombatModeTick = 0,
-    MeleeHighlight = nil,
-    RangedHighlight = nil,
+    MeleeHighlights = {}, 
+    RangedHighlights = {},
     ActiveToggles = {},
     ESPObjects = {},
     
@@ -73,7 +77,8 @@ local function GenerateNeonTheme()
         C1 = Color3.fromHSV(h1, 0.8, 1),
         C2 = Color3.fromHSV(h2, 0.9, 1),
         Dark = Color3.fromHSV(h1, 0.5, 0.1),
-        Darker = Color3.fromHSV(h1, 0.5, 0.05)
+        Darker = Color3.fromHSV(h1, 0.5, 0.05),
+        Background = Color3.fromHSV(h1, 0.5, 0.15)
     }
 end
 
@@ -87,7 +92,7 @@ local function ApplyGradient(guiObj)
 end
 
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "KillSystemUI_v9"
+ScreenGui.Name = "KillSystemUI_v10"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.DisplayOrder = 999
 pcall(function() ScreenGui.Parent = CoreGui end)
@@ -96,6 +101,41 @@ if not ScreenGui.Parent then ScreenGui.Parent = LocalPlayer:WaitForChild("Player
 local BlurEffect = Instance.new("BlurEffect")
 BlurEffect.Size = 0
 BlurEffect.Parent = Lighting
+
+-- ==========================================
+-- [范围可视化圆环]
+-- ==========================================
+local RangeMarker = Instance.new("Part")
+RangeMarker.Shape = Enum.PartType.Ball
+RangeMarker.Material = Enum.Material.ForceField
+RangeMarker.Color = Color3.fromRGB(0, 255, 0)
+RangeMarker.Transparency = 0.8
+RangeMarker.Anchored = true
+RangeMarker.CanCollide = false
+RangeMarker.CanQuery = false
+RangeMarker.Visible = false
+RangeMarker.Parent = workspace
+
+RunService.RenderStepped:Connect(function()
+    local char = LocalPlayer.Character
+    if char and char:FindFirstChild("HumanoidRootPart") then
+        local root = char.HumanoidRootPart
+        local showMelee = Config.Melee_Enabled
+        local showRanged = Config.Ranged_Enabled
+        
+        if showMelee or showRanged then
+            RangeMarker.Visible = true
+            local r = showMelee and Config.Melee_Range or Config.Ranged_Range
+            RangeMarker.Size = Vector3.new(r*2, r*2, r*2)
+            RangeMarker.CFrame = root.CFrame
+            RangeMarker.Color = showMelee and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(50, 150, 255)
+        else
+            RangeMarker.Visible = false
+        end
+    else
+        RangeMarker.Visible = false
+    end
+end)
 
 -- ==========================================
 -- [侧边栏系统]
@@ -322,6 +362,74 @@ local function CreateToggle(parent, name, configKey, icon)
     return row
 end
 
+-- 恢复范围调试滑块控件
+local function CreateSlider(parent, name, minVal, maxVal, default, configKey)
+    local row = CreateRow(parent, 50)
+    
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(0.5, -20, 0, 40)
+    label.Position = UDim2.new(0, 15, 0, 5)
+    label.BackgroundTransparency = 1
+    label.Text = name
+    label.TextColor3 = Color3.fromRGB(230, 230, 230)
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Font = Enum.Font.Gotham
+    label.TextSize = 14
+    label.Parent = row
+
+    local valLabel = Instance.new("TextLabel")
+    valLabel.Size = UDim2.new(0.5, -10, 0, 40)
+    valLabel.Position = UDim2.new(0.5, 5, 0, 5)
+    valLabel.BackgroundTransparency = 1
+    valLabel.TextColor3 = Theme.C1
+    valLabel.TextXAlignment = Enum.TextXAlignment.Right
+    valLabel.Font = Enum.Font.GothamMedium
+    valLabel.TextSize = 14
+    valLabel.Text = tostring(default)
+    valLabel.Parent = row
+
+    local barBg = Instance.new("Frame")
+    barBg.Size = UDim2.new(1, -30, 0, 6)
+    barBg.Position = UDim2.new(0, 15, 0, 38)
+    barBg.BackgroundColor3 = Theme.Background
+    barBg.Parent = row
+    Instance.new("UICorner", barBg).CornerRadius = UDim.new(1, 0)
+    
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new((default-minVal)/(maxVal-minVal), 0, 1, 0)
+    fill.BackgroundColor3 = Theme.C1
+    fill.Parent = barBg
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+    local dragging = false
+    local function update(inputPos)
+        local rel = (inputPos.X - barBg.AbsolutePosition.X) / barBg.AbsoluteSize.X
+        rel = math.clamp(rel, 0, 1)
+        local val = math.floor(minVal + (maxVal - minVal) * rel)
+        fill.Size = UDim2.new(rel, 0, 1, 0)
+        valLabel.Text = tostring(val)
+        Config[configKey] = val
+    end
+
+    barBg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            update(input.Position)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            update(input.Position)
+        end
+    end)
+    return row
+end
+
 local function CreateMultiSelectList(parent, name, getOptionsFunc, configKey, callback)
     local row = CreateRow(parent, 40)
     local selectedTable = Config[configKey]
@@ -420,7 +528,6 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
             local pos = input.Position
             State.IsPlacingShortcut = false
 
-            -- 修复：不再销毁所有快捷键，允许多个共存
             local bindAction = State.CurrentActionToBind
             State.CurrentActionToBind = nil
             local key = bindAction.configKey
@@ -447,7 +554,6 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
                     pressTime = tick()
                     task.delay(0.8, function()
                         if holding and tick() - pressTime >= 0.8 and shortcut.Parent then
-                            -- 长按销毁自身并从表中移除
                             shortcut:Destroy()
                             for i, sc in ipairs(State.Shortcuts) do
                                 if sc == shortcut then table.remove(State.Shortcuts, i) break end
@@ -496,6 +602,7 @@ end
 
 CreateSideIcon("⚔️", function()
     OpenPopup("近战杀戮", function(holder)
+        CreateSlider(holder, "攻击范围", 5, 1000, Config.Melee_Range, "Melee_Range")
         CreateToggle(holder, "自动攻击", "Melee_Enabled", "⚔️")
         CreateToggle(holder, "多部位打击", "Melee_MultiHit", "🎯")
         CreateToggle(holder, "强制战斗模式", "Melee_ForceCombatMode", "🔥")
@@ -514,9 +621,12 @@ end)
 
 CreateSideIcon("🔫", function()
     OpenPopup("远程杀戮", function(holder)
+        CreateSlider(holder, "攻击范围", 100, 5000, Config.Ranged_Range, "Ranged_Range")
         CreateToggle(holder, "自动枪锁", "Ranged_Enabled", "🔫")
         CreateToggle(holder, "仅爆头", "Ranged_AutoHeadshot", "🧠")
         CreateToggle(holder, "散弹多发模拟", "Ranged_MultiBullet", "💥")
+        CreateToggle(holder, "子弹穿墙", "Ranged_WallBang", "🧱")
+        CreateToggle(holder, "无停顿连射", "Ranged_NoCooldown", "⚡")
         CreateToggle(holder, "好友检测", "Ranged_CheckFriends", "🤝")
         CreateToggle(holder, "可见性检测", "Ranged_CheckVisibility", "👁️")
 
@@ -557,33 +667,37 @@ local function FetchRemote()
     return nil
 end
 
-local function GetTargetPlayer(mode)
+-- 获取范围内所有有效目标
+local function GetValidTargets(mode)
     local localChar = LocalPlayer.Character
-    if not localChar or not localChar:FindFirstChild("HumanoidRootPart") or not localChar:FindFirstChild("Humanoid") then return nil end
-    if localChar.Humanoid.Health <= 0 then return nil end
+    if not localChar or not localChar:FindFirstChild("HumanoidRootPart") or not localChar:FindFirstChild("Humanoid") then return {} end
+    if localChar.Humanoid.Health <= 0 then return {} end
 
     local localRoot = localChar.HumanoidRootPart
-    local closestPlayer, shortestDist = nil, 10000
+    local validTargets = {}
     
     local checkFriends = Config[mode .. "_CheckFriends"]
     local checkVis = Config[mode .. "_CheckVisibility"]
+    -- 如果远程开启了穿墙，则强制关闭可见性检测
+    if mode == "Ranged" and Config.Ranged_WallBang then checkVis = false end
+    
     local allowedTeams = Config[mode .. "_AllowedTeams"]
+    local range = Config[mode .. "_Range"]
     
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer then
             if #allowedTeams > 0 then
                 if not player.Team or not table.find(allowedTeams, player.Team.Name) then continue end
             end
-            if checkFriends then
-                if LocalPlayer:IsFriendsWith(player.UserId) then continue end
-            end
+            if checkFriends and LocalPlayer:IsFriendsWith(player.UserId) then continue end
 
             local targetChar = player.Character
             if targetChar and targetChar:FindFirstChild("HumanoidRootPart") and targetChar:FindFirstChild("Humanoid") then
                 if targetChar.Humanoid.Health > 0 then
                     local targetRoot = targetChar.HumanoidRootPart
                     local dist = (targetRoot.Position - localRoot.Position).Magnitude
-                    if dist < shortestDist then
+                    
+                    if dist <= range then
                         local isVisible = true
                         if checkVis then
                             local params = RaycastParams.new()
@@ -594,37 +708,54 @@ local function GetTargetPlayer(mode)
                         end
                         
                         if isVisible then
-                            shortestDist = dist
-                            closestPlayer = player
+                            table.insert(validTargets, {Player = player, Dist = dist, Char = targetChar, Root = targetRoot})
                         end
                     end
                 end
             end
         end
     end
-    return closestPlayer
+    
+    table.sort(validTargets, function(a, b) return a.Dist < b.Dist end)
+    return validTargets
 end
 
-local function ManageHighlight(targetChar, highlightStateVar, color)
-    if not targetChar then
-        if State[highlightStateVar] then
-            State[highlightStateVar]:Destroy()
-            State[highlightStateVar] = nil
+local function ManageMultiHighlight(activeChars, highlightTable, color)
+    for key, hl in pairs(highlightTable) do
+        if not hl.Parent or not hl.Parent.Parent or not table.find(activeChars, hl.Parent) then
+            hl:Destroy()
+            highlightTable[key] = nil
         end
-        return
     end
-    if not State[highlightStateVar] or State[highlightStateVar].Parent ~= targetChar then
-        if State[highlightStateVar] then State[highlightStateVar]:Destroy() end
-        State[highlightStateVar] = Instance.new("Highlight")
-        State[highlightStateVar].FillColor = color
-        State[highlightStateVar].OutlineColor = Color3.fromRGB(255, 255, 255)
-        State[highlightStateVar].FillTransparency = 0.5
-        State[highlightStateVar].Parent = targetChar
+
+    for _, char in ipairs(activeChars) do
+        local hasHighlight = false
+        for _, hl in pairs(highlightTable) do
+            if hl.Parent == char then
+                hasHighlight = true
+                break
+            end
+        end
+        if not hasHighlight then
+            local newHl = Instance.new("Highlight")
+            newHl.FillColor = color
+            newHl.OutlineColor = Color3.fromRGB(255, 255, 255)
+            newHl.FillTransparency = 0.5
+            newHl.Parent = char
+            table.insert(highlightTable, newHl)
+        end
     end
+end
+
+local function ClearHighlights(highlightTable)
+    for _, hl in pairs(highlightTable) do
+        if hl then hl:Destroy() end
+    end
+    table.clear(highlightTable)
 end
 
 -- ==========================================
--- [近战战斗逻辑]
+-- [近战战斗逻辑 - 示范逻辑重构AOE版]
 -- ==========================================
 local function GetBodyPartsArray(character)
     local parts = {}
@@ -641,7 +772,7 @@ function StartMeleeLoop()
     if State.MeleeThread then task.cancel(State.MeleeThread) end
     State.MeleeThread = task.spawn(function()
         while Config.Melee_Enabled do
-            task.wait() 
+            task.wait(0.3) -- 保持示范代码的 0.3 秒节奏
             
             local Remote = FetchRemote()
             if not Remote then task.wait(1) continue end
@@ -654,43 +785,55 @@ function StartMeleeLoop()
                 pcall(function() Remote:FireServer("combatMode", false) end)
             end
 
-            local target = GetTargetPlayer("Melee")
+            local targets = GetValidTargets("Melee")
             local localChar = LocalPlayer.Character
             
-            if target and target.Character and localChar and localChar:FindFirstChild("HumanoidRootPart") then
-                local targetRoot = target.Character.HumanoidRootPart
+            if #targets > 0 and localChar and localChar:FindFirstChild("HumanoidRootPart") then
+                local activeChars = {}
+                local localRoot = localChar.HumanoidRootPart
+                local localPos = localRoot.Position
                 
-                local bodyPartsArr = Config.Melee_MultiHit and GetBodyPartsArray(target.Character) or {{ [1] = "HumanoidRootPart", [2] = 1 }}
-                local firstPartName = bodyPartsArr[1][1]
-                local hitPart = target.Character:FindFirstChild(firstPartName) or targetRoot
-                local actualHitPos = hitPart.Position
+                -- AOE 遍历所有目标并分配独立线程
+                for _, targetData in ipairs(targets) do
+                    local targetChar = targetData.Char
+                    table.insert(activeChars, targetChar)
+                    
+                    task.spawn(function()
+                        local bodyPartsArr = Config.Melee_MultiHit and GetBodyPartsArray(targetChar) or {{ [1] = "HumanoidRootPart", [2] = 1 }}
+                        
+                        local targetPos = targetData.Root.Position
+                        -- 严格照搬示范代码的向量计算
+                        local direction = (localPos - targetPos).Unit 
+                        
+                        local args = {
+                            [1] = "damage",
+                            [2] = {
+                                ["bodyParts"] = bodyPartsArr,
+                                ["shotCode"] = {
+                                    [1] = targetPos, 
+                                    [2] = direction 
+                                },
+                                ["target"] = targetData.Player,
+                                ["pos"] = localPos 
+                            }
+                        }
 
-                local cam = workspace.CurrentCamera
-                local shotCode = { cam.CFrame.Position, cam.CFrame.LookVector }
-
-                local args = {
-                    [1] = "damage",
-                    [2] = {
-                        ["bodyParts"] = bodyPartsArr,
-                        ["shotCode"] = shotCode,
-                        ["target"] = target,
-                        ["pos"] = actualHitPos 
-                    }
-                }
-
-                pcall(function() Remote:FireServer(unpack(args)) end)
-                ManageHighlight(target.Character, "MeleeHighlight", Color3.fromRGB(255, 0, 0))
+                        pcall(function() Remote:FireServer(unpack(args)) end)
+                    end)
+                end
+                
+                ManageMultiHighlight(activeChars, State.MeleeHighlights, Color3.fromRGB(255, 0, 0))
             else
-                ManageHighlight(nil, "MeleeHighlight")
+                ManageMultiHighlight({}, State.MeleeHighlights)
             end
         end
-        ManageHighlight(nil, "MeleeHighlight")
+        ClearHighlights(State.MeleeHighlights)
         State.MeleeThread = nil
     end)
 end
 
 -- ==========================================
--- [远程战斗逻辑]
+-- [远程战斗逻辑 - AOE多线程并发]
 -- ==========================================
 local function GetEquippedWeaponName()
     local char = LocalPlayer.Character
@@ -724,59 +867,73 @@ function StartRangedLoop()
     if State.RangedThread then task.cancel(State.RangedThread) end
     State.RangedThread = task.spawn(function()
         while Config.Ranged_Enabled do
-            task.wait()
+            -- 无停顿连射开关控制等待时间
+            if Config.Ranged_NoCooldown then
+                RunService.Heartbeat:Wait()
+            else
+                task.wait(0.1)
+            end
             
             local Remote = FetchRemote()
             if not Remote then task.wait(1) continue end
             
-            local target = GetTargetPlayer("Ranged")
+            local targets = GetValidTargets("Ranged")
             local localChar = LocalPlayer.Character
             
-            if target and target.Character and localChar and localChar:FindFirstChild("HumanoidRootPart") then
-                local targetChar = target.Character
-                local hitPartName = Config.Ranged_AutoHeadshot and "Head" or "HumanoidRootPart"
-                local hitPart = targetChar:FindFirstChild(hitPartName) or targetChar:FindFirstChild("HumanoidRootPart")
-                if not hitPart then continue end
+            if #targets > 0 and localChar and localChar:FindFirstChild("HumanoidRootPart") then
+                local activeChars = {}
                 
-                local hitPos = hitPart.Position
-                local barrelPos = GetBarrelPos(localChar)
-                local direction = (hitPos - barrelPos).Unit
-                local shotCode = { barrelPos, direction }
-                local weaponName = GetEquippedWeaponName()
-                
-                local bulletCount = Config.Ranged_MultiBullet and 3 or 1
-                for i = 1, bulletCount do
-                    local bulletArgs = {
-                        [1] = "bullet",
-                        [2] = {
-                            ["weaponName"] = weaponName,
-                            ["posDestroyX"] = hitPos.X + (i * 0.5), 
-                            ["pos"] = hitPos 
+                for _, targetData in ipairs(targets) do
+                    local targetChar = targetData.Char
+                    table.insert(activeChars, targetChar)
+                    
+                    task.spawn(function()
+                        local hitPartName = Config.Ranged_AutoHeadshot and "Head" or "HumanoidRootPart"
+                        local hitPart = targetChar:FindFirstChild(hitPartName) or targetChar:FindFirstChild("HumanoidRootPart")
+                        if not hitPart then return end
+                        
+                        local hitPos = hitPart.Position
+                        local barrelPos = GetBarrelPos(localChar)
+                        local direction = (hitPos - barrelPos).Unit
+                        local shotCode = { barrelPos, direction }
+                        local weaponName = GetEquippedWeaponName()
+                        
+                        local bulletCount = Config.Ranged_MultiBullet and 3 or 1
+                        for i = 1, bulletCount do
+                            local bulletArgs = {
+                                [1] = "bullet",
+                                [2] = {
+                                    ["weaponName"] = weaponName,
+                                    ["posDestroyX"] = hitPos.X + (i * 0.5), 
+                                    ["pos"] = hitPos 
+                                }
+                            }
+                            pcall(function() Remote:FireServer(unpack(bulletArgs)) end)
+                        end
+                        
+                        local damageArgs = {
+                            [1] = "damage",
+                            [2] = {
+                                ["bodyParts"] = { [1] = { [1] = hitPartName, [2] = 1 } },
+                                ["shotCode"] = shotCode,
+                                ["target"] = targetData.Player,
+                                ["pos"] = hitPos
+                            }
                         }
-                    }
-                    pcall(function() Remote:FireServer(unpack(bulletArgs)) end)
+                        if Config.Ranged_AutoHeadshot then
+                            damageArgs[2]["damageFactor"] = 1.5
+                        end
+                        
+                        pcall(function() Remote:FireServer(unpack(damageArgs)) end)
+                    end)
                 end
                 
-                local damageArgs = {
-                    [1] = "damage",
-                    [2] = {
-                        ["bodyParts"] = { [1] = { [1] = hitPartName, [2] = 1 } },
-                        ["shotCode"] = shotCode,
-                        ["target"] = target,
-                        ["pos"] = hitPos
-                    }
-                }
-                if Config.Ranged_AutoHeadshot then
-                    damageArgs[2]["damageFactor"] = 1.5
-                end
-                
-                pcall(function() Remote:FireServer(unpack(damageArgs)) end)
-                ManageHighlight(targetChar, "RangedHighlight", Color3.fromRGB(0, 0, 255))
+                ManageMultiHighlight(activeChars, State.RangedHighlights, Color3.fromRGB(0, 0, 255))
             else
-                ManageHighlight(nil, "RangedHighlight")
+                ManageMultiHighlight({}, State.RangedHighlights)
             end
         end
-        ManageHighlight(nil, "RangedHighlight")
+        ClearHighlights(State.RangedHighlights)
         State.RangedThread = nil
     end)
 end
@@ -785,7 +942,6 @@ end
 -- [实用工具逻辑]
 -- ==========================================
 
--- 1. 玩家透视 (ESP强化)
 function ClearESP()
     for _, obj in pairs(State.ESPObjects) do
         if obj.Highlight then obj.Highlight:Destroy() end
@@ -793,6 +949,14 @@ function ClearESP()
     end
     State.ESPObjects = {}
 end
+
+Players.PlayerRemoving:Connect(function(player)
+    if State.ESPObjects[player] then
+        State.ESPObjects[player].Highlight:Destroy()
+        State.ESPObjects[player].Billboard:Destroy()
+        State.ESPObjects[player] = nil
+    end
+end)
 
 RunService.RenderStepped:Connect(function()
     if not Config.ESP_Enabled then return end
@@ -802,58 +966,58 @@ RunService.RenderStepped:Connect(function()
             local char = player.Character
             local obj = State.ESPObjects[player]
 
-            if char and char:FindFirstChild("HumanoidRootPart") and char:FindFirstChild("Humanoid") then
-                if char.Humanoid.Health > 0 then
-                    if not obj then
-                        obj = {}
-                        obj.Highlight = Instance.new("Highlight")
-                        obj.Highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
-                        obj.Highlight.FillTransparency = 0.7
-                        obj.Highlight.Parent = char
+            if char and char:FindFirstChild("HumanoidRootPart") and char:FindFirstChild("Humanoid") and char.Humanoid.Health > 0 then
+                if not obj then
+                    obj = {}
+                    obj.Highlight = Instance.new("Highlight")
+                    obj.Highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+                    obj.Highlight.FillTransparency = 0.7
+                    obj.Highlight.Parent = char
 
-                        obj.Billboard = Instance.new("BillboardGui")
-                        obj.Billboard.Size = UDim2.new(0, 200, 0, 30)
-                        obj.Billboard.StudsOffset = Vector3.new(0, 3, 0)
-                        obj.Billboard.AlwaysOnTop = true
-                        obj.Billboard.Parent = char.HumanoidRootPart
+                    obj.Billboard = Instance.new("BillboardGui")
+                    obj.Billboard.Size = UDim2.new(0, 200, 0, 30)
+                    obj.Billboard.StudsOffset = Vector3.new(0, 3, 0)
+                    obj.Billboard.AlwaysOnTop = true
+                    obj.Billboard.Parent = char.HumanoidRootPart
 
-                        local lbl = Instance.new("TextLabel", obj.Billboard)
-                        lbl.Size = UDim2.new(1, 0, 1, 0)
-                        lbl.BackgroundTransparency = 1
-                        lbl.TextStrokeTransparency = 0
-                        lbl.Font = Enum.Font.GothamBold
-                        lbl.TextSize = 14
-                        obj.Label = lbl
-                        
-                        State.ESPObjects[player] = obj
-                    end
+                    local lbl = Instance.new("TextLabel", obj.Billboard)
+                    lbl.Size = UDim2.new(1, 0, 1, 0)
+                    lbl.BackgroundTransparency = 1
+                    lbl.TextStrokeTransparency = 0
+                    lbl.Font = Enum.Font.GothamBold
+                    lbl.TextSize = 14
+                    obj.Label = lbl
                     
-                    -- 动态更新颜色与状态
-                    local teamColor = player.Team and player.Team.TeamColor.Color or Color3.fromRGB(255, 255, 255)
-                    obj.Highlight.FillColor = teamColor
-                    
-                    local lockText = ""
-                    local textColor = teamColor
-                    
-                    if State.MeleeHighlight and State.MeleeHighlight.Parent == char then
-                        lockText = " [近战锁]"
-                        textColor = Color3.fromRGB(255, 50, 50)
-                        obj.Highlight.FillColor = Color3.fromRGB(255, 50, 50)
-                    elseif State.RangedHighlight and State.RangedHighlight.Parent == char then
-                        lockText = " [远程锁]"
-                        textColor = Color3.fromRGB(50, 150, 255)
-                        obj.Highlight.FillColor = Color3.fromRGB(50, 150, 255)
-                    end
-                    
-                    obj.Label.TextColor3 = textColor
-                    obj.Label.Text = string.format("%s [%d/%d]%s", player.Name, math.floor(char.Humanoid.Health), char.Humanoid.MaxHealth, lockText)
-                else
-                    if obj then
-                        obj.Highlight:Destroy()
-                        obj.Billboard:Destroy()
-                        State.ESPObjects[player] = nil
-                    end
+                    State.ESPObjects[player] = obj
                 end
+                
+                local teamColor = player.Team and player.Team.TeamColor.Color or Color3.fromRGB(255, 255, 255)
+                obj.Highlight.FillColor = teamColor
+                
+                local lockText = ""
+                local textColor = teamColor
+                local isMeleeLocked = false
+                local isRangedLocked = false
+
+                for _, hl in pairs(State.MeleeHighlights) do
+                    if hl.Parent == char then isMeleeLocked = true break end
+                end
+                for _, hl in pairs(State.RangedHighlights) do
+                    if hl.Parent == char then isRangedLocked = true break end
+                end
+
+                if isMeleeLocked then
+                    lockText = " [近战锁]"
+                    textColor = Color3.fromRGB(255, 50, 50)
+                    obj.Highlight.FillColor = Color3.fromRGB(255, 50, 50)
+                elseif isRangedLocked then
+                    lockText = " [远程锁]"
+                    textColor = Color3.fromRGB(50, 150, 255)
+                    obj.Highlight.FillColor = Color3.fromRGB(50, 150, 255)
+                end
+                
+                obj.Label.TextColor3 = textColor
+                obj.Label.Text = string.format("%s [%d/%d]%s", player.Name, math.floor(char.Humanoid.Health), char.Humanoid.MaxHealth, lockText)
             else
                 if obj then
                     obj.Highlight:Destroy()
@@ -865,7 +1029,6 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- 2. 秒互动
 workspace.DescendantAdded:Connect(function(d)
     if Config.InstantInteract_Enabled and d:IsA("ProximityPrompt") then
         d.HoldDuration = 0
@@ -887,4 +1050,4 @@ task.spawn(function()
     end
 end)
 
-print("[KillSystem v9.7] 快捷键共存与ESP强化版已加载。")
+print("[KillSystem v10.0] 范围调试与近战重构版已加载。")
